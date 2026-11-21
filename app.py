@@ -1,134 +1,844 @@
+
 import streamlit as st
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
+import matplotlib.pyplot as plt
+from matplotlib.patches import Circle, Ellipse
+from matplotlib.collections import LineCollection
+import random
+import math
 
-st.set_page_config(page_title="ACO Step-by-Step", page_icon="🐜", layout="wide")
-CITIES = ["A", "B", "C", "D"]
-DIST = np.array([[0,4,2,5],[4,0,3,2],[2,3,0,4],[5,2,4,0]], dtype=float)
-POS = {"A":(0,1), "B":(2,1), "C":(0,0), "D":(2,0)}
-PSEUDO = [("identify","Identifier les villes accessibles non visitées"),("probability","Calculer les probabilités de transition"),("select","Choisir la prochaine ville"),("move","Ajouter la ville au parcours"),("evaluate","Évaluer les tournées"),("evaporate","Faire évaporer les phéromones"),("deposit","Déposer les phéromones"),("done","Passer à l’itération suivante")]
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
-def route_text(route): return " → ".join(CITIES[i] for i in route)
-def length(route): return sum(DIST[a,b] for a,b in zip(route[:-1],route[1:]))
-def reset(nants, niters, alpha, beta, rho, q, seed):
-    s=st.session_state; s.tau=np.ones((4,4)); np.fill_diagonal(s.tau,0)
-    s.ants=[dict(id=k+1,start=k%4,route=[k%4],candidates=[],probs=[],selected=None) for k in range(nants)]
-    s.ant_idx=0; s.stage="identify"; s.phase="construct"; s.iteration=1; s.routes=[]; s.best_route=None; s.best_len=float("inf"); s.history=[]
-    s.alpha=alpha; s.beta=beta; s.rho=rho; s.q=q; s.nants=nants; s.niters=niters; s.seed=seed; s.rng=np.random.default_rng(seed); s.message="Matrices initialisées : τ=1 et η=1/d."
-def ant_now():
-    s=st.session_state
-    return s.ants[s.ant_idx] if s.phase=="construct" and s.ants else None
-def step():
-    s=st.session_state; a=ant_now()
-    if s.phase=="construct" and a:
-        visited=a["route"]
-        if s.stage=="identify":
-            a["candidates"]=[a["start"]] if len(visited)==4 else [i for i in range(4) if i not in visited]
-            a["probs"]=[]; s.stage="probability"; s.message=f"Fourmi {a['id']} : candidats identifiés."
-        elif s.stage=="probability":
-            cur=visited[-1]; cand=a["candidates"]
-            if len(visited)==4: probs=np.array([1.0])
-            else:
-                w=np.array([(s.tau[cur,j]**s.alpha)*(1/DIST[cur,j]**s.beta) for j in cand]); probs=w/w.sum()
-            a["probs"]=probs.tolist(); s.stage="select"; s.message="Probabilités calculées et normalisées."
-        elif s.stage=="select":
-            pos=int(s.rng.choice(len(a["candidates"]),p=np.array(a["probs"]))); a["selected"]=a["candidates"][pos]; s.stage="move"; s.message=f"La fourmi {a['id']} choisit {CITIES[a['selected']]}."
-        elif s.stage=="move":
-            a["route"].append(a["selected"]); s.message="Déplacement : "+route_text(a["route"])
-            if len(a["route"])==5:
-                L=length(a["route"]); s.routes.append(dict(ant=a["id"],route=a["route"].copy(),length=L)); s.ant_idx+=1
-                if s.ant_idx>=len(s.ants): s.phase="evaluate"; s.stage="evaluate"; s.message="Toutes les fourmis ont terminé."
-                else: s.stage="identify"
-            else: s.stage="identify'
-    elif s.phase=="evaluate":
-        best=min(s.routes,key=lambda x:x["length"])
-        if best["length"]<s.best_len: s.best_len=best["length"]; s.best_route=best["route"].copy()
-        s.phase="evaporate"; s.stage="evaporate"; s.message=f"Meilleure tournée de cette itération : {best['length']:.2f}."
-    elif s.phase=="evaporate":
-        s.tau*=1-s.rho; s.phase="deposit"; s.stage="deposit"; s.message=f"Évaporation : τ ← (1−ρ)τ, ρ={s.rho:.2f}."
-    elif s.phase=="deposit":
-        for item in s.routes:
-            amount=s.q/item["length"]
-            for i,j in zip(item["route"][:-1],item["route"][1:]): s.tau[i,j]+=amount; s.tau[j,i]+=amount
-        s.history.append(s.best_len); s.phase="done"; s.stage="done"; s.message="Dépôt terminé : matrice des phéromones mise à jour."
-    elif s.phase=="done":
-        if s.iteration>=s.niters: s.phase="finished"; s.message="Simulation terminée."
+st.set_page_config(
+    page_title="ACO - Recherche de nourriture",
+    page_icon="🐜",
+    layout="wide"
+)
+
+ROWS = 14
+COLS = 20
+
+NEST = (12, 1)
+FOOD = (1, 18)
+
+OBSTACLES = {
+    (3, 4), (3, 5), (3, 6),
+    (4, 6), (5, 6),
+    (7, 3), (7, 4), (7, 5),
+    (8, 12), (8, 13), (8, 14),
+    (9, 14), (10, 14),
+    (3, 15), (4, 15), (5, 15),
+    (11, 8), (11, 9)
+}
+
+DIRECTIONS = [
+    (-1, 0), (1, 0),
+    (0, -1), (0, 1),
+    (-1, -1), (-1, 1),
+    (1, -1), (1, 1)
+]
+
+# ============================================================
+# SESSION STATE
+# ============================================================
+
+def initialize():
+    st.session_state.pheromones = np.ones((ROWS, COLS), dtype=float)
+    st.session_state.ants = []
+    st.session_state.iteration = 1
+    st.session_state.step = 0
+    st.session_state.best_path = None
+    st.session_state.best_length = float("inf")
+    st.session_state.completed_paths = []
+    st.session_state.history = []
+    st.session_state.current_ant = 0
+    st.session_state.stage = "initialisation"
+    st.session_state.last_candidates = []
+    st.session_state.last_decision = None
+    st.session_state.message = "Simulation initialisée."
+    st.session_state.started = False
+
+    for i in range(st.session_state.nb_ants):
+        st.session_state.ants.append({
+            "id": i + 1,
+            "position": NEST,
+            "path": [NEST],
+            "phase": "aller",
+            "status": "active",
+            "length": 0.0,
+            "steps": 0,
+            "color": plt.cm.tab20(i % 20),
+        })
+
+
+if "nb_ants" not in st.session_state:
+    st.session_state.nb_ants = 5
+
+if "initialized" not in st.session_state:
+    st.session_state.initialized = False
+
+# ============================================================
+# ENVIRONMENT
+# ============================================================
+
+def valid_cell(cell):
+    r, c = cell
+
+    return (
+        0 <= r < ROWS
+        and 0 <= c < COLS
+        and cell not in OBSTACLES
+    )
+
+
+def distance(a, b):
+    return math.sqrt(
+        (a[0] - b[0]) ** 2 +
+        (a[1] - b[1]) ** 2
+    )
+
+
+def get_neighbors(position):
+    r, c = position
+    neighbors = []
+
+    for dr, dc in DIRECTIONS:
+        candidate = (r + dr, c + dc)
+
+        if not valid_cell(candidate):
+            continue
+
+        # Prevent diagonal movement through obstacle corners.
+        if dr != 0 and dc != 0:
+            if not valid_cell((r + dr, c)):
+                continue
+            if not valid_cell((r, c + dc)):
+                continue
+
+        neighbors.append(candidate)
+
+    return neighbors
+
+
+# ============================================================
+# HEURISTIC AND PROBABILITY
+# ============================================================
+
+def calculate_probabilities(ant, alpha, beta, pheromones):
+    position = ant["position"]
+    candidates = get_neighbors(position)
+
+    if not candidates:
+        return []
+
+    data = []
+    total = 0.0
+
+    for cell in candidates:
+        d = distance(position, cell)
+
+        tau = max(float(pheromones[cell]), 0.001)
+
+        if ant["phase"] == "aller":
+            remaining_distance = distance(cell, FOOD)
         else:
-            s.iteration+=1; s.ants=[dict(id=k+1,start=k%4,route=[k%4],candidates=[],probs=[],selected=None) for k in range(s.nants)]
-            s.ant_idx=0; s.routes=[]; s.phase="construct"; s.stage="identify"; s.message="Nouvelle itération : phéromones actualisées."
+            remaining_distance = distance(cell, NEST)
 
-def graph():
-    s=st.session_state; fig=go.Figure()
-    for i in range(4):
-        for j in range(i+1,4):
-            x0,y0=POS[CITIES[i]]; x1,y1=POS[CITIES[j]]; tau=s.tau[i,j]
-            fig.add_trace(go.Scatter(x=[x0,x1],y=[y0,y1],mode="lines",line=dict(width=1.5+min(tau,8)*.55,color="#8A9AAF"),hovertemplate=f"{CITIES[i]}–{CITIES[j]}<br>d={DIST[i,j]}<br>τ={tau:.2f}<extra></extra>",showlegend=False))
-            fig.add_annotation(x=(x0+x1)/2,y=(y0+y1)/2,text=f"d={DIST[i,j]:.0f}<br>τ={tau:.2f}",showarrow=False,bgcolor="rgba(255,255,255,.8)",font=dict(size=10))
-    colors=["#2563EB","#DB7C26","#16A36A","#A855F7","#D9468D"]
-    for k,item in enumerate(s.routes):
-        r=item["route"]; fig.add_trace(go.Scatter(x=[POS[CITIES[i]][0] for i in r],y=[POS[CITIES[i]][1] for i in r],mode="lines",line=dict(color=colors[k%len(colors)],width=2,dash="dot"),name=f"Fourmi {item['ant']}"))
-    a=ant_now()
-    if a:
-        r=a["route"]; fig.add_trace(go.Scatter(x=[POS[CITIES[i]][0] for i in r],y=[POS[CITIES[i]][1] for i in r],mode="lines+markers",line=dict(color="#E11D48",width=5),name=f"Fourmi active {a['id']}"))
-    fig.add_trace(go.Scatter(x=[POS[c][0] for c in CITIES],y=[POS[c][1] for c in CITIES],mode="markers+text",text=CITIES,textposition="middle center",marker=dict(size=38,color="#DCEBFF",line=dict(color="#2563EB",width=2)),textfont=dict(size=15,color="#12345A"),name="Villes"))
-    fig.update_layout(height=360,margin=dict(l=5,r=5,t=5,b=5),xaxis=dict(visible=False,range=[-.5,2.5]),yaxis=dict(visible=False,range=[-.4,1.4],scaleanchor="x"),legend=dict(orientation="h",y=-.12))
+        eta = 1.0 / max(remaining_distance, 0.1)
+
+        # Discourage immediate loops and repeated visits.
+        visit_count = ant["path"].count(cell)
+        revisit_factor = 0.15 ** visit_count
+
+        weight = (
+            (tau ** alpha) *
+            (eta ** beta) *
+            revisit_factor
+        )
+
+        data.append({
+            "cell": cell,
+            "distance": d,
+            "tau": tau,
+            "eta": eta,
+            "weight": weight
+        })
+
+        total += weight
+
+    for item in data:
+        item["probability"] = (
+            item["weight"] / total if total > 0 else 0
+        )
+
+    return data
+
+
+def choose_next_position(candidates):
+    if not candidates:
+        return None
+
+    probabilities = [
+        item["probability"] for item in candidates
+    ]
+
+    index = random.choices(
+        range(len(candidates)),
+        weights=probabilities,
+        k=1
+    )[0]
+
+    return candidates[index]["cell"]
+
+
+# ============================================================
+# ANT MOVEMENT
+# ============================================================
+
+def move_ant(ant, alpha, beta):
+    if ant["status"] != "active":
+        return
+
+    candidates = calculate_probabilities(
+        ant,
+        alpha,
+        beta,
+        st.session_state.pheromones
+    )
+
+    st.session_state.last_candidates = candidates
+    st.session_state.current_ant = ant["id"]
+
+    if not candidates:
+        ant["status"] = "bloquee"
+        st.session_state.message = (
+            f"La fourmi {ant['id']} est bloquée."
+        )
+        return
+
+    next_position = choose_next_position(candidates)
+
+    selected = next(
+        item for item in candidates
+        if item["cell"] == next_position
+    )
+
+    st.session_state.last_decision = selected
+
+    step_distance = distance(
+        ant["position"],
+        next_position
+    )
+
+    ant["length"] += step_distance
+    ant["steps"] += 1
+    ant["position"] = next_position
+    ant["path"].append(next_position)
+
+    # The ant finds the food.
+    if next_position == FOOD and ant["phase"] == "aller":
+        ant["phase"] = "retour"
+        st.session_state.message = (
+            f"🐜 Fourmi {ant['id']} a trouvé la nourriture ! "
+            "Elle retourne au nid."
+        )
+        return
+
+    # The ant returns to the nest.
+    if next_position == NEST and ant["phase"] == "retour":
+        ant["status"] = "terminée"
+
+        route = ant["path"].copy()
+        length = ant["length"]
+
+        st.session_state.completed_paths.append({
+            "fourmi": ant["id"],
+            "chemin": route,
+            "distance": length
+        })
+
+        if length < st.session_state.best_length:
+            st.session_state.best_length = length
+            st.session_state.best_path = route
+
+        st.session_state.message = (
+            f"Fourmi {ant['id']} est revenue au nid. "
+            f"Distance parcourue : {length:.2f}"
+        )
+        return
+
+    # Safety limit to avoid endless wandering.
+    if ant["steps"] >= ROWS * COLS * 2:
+        ant["status"] = "bloquee"
+        st.session_state.message = (
+            f"La fourmi {ant['id']} a atteint la limite de déplacement."
+        )
+        return
+
+    st.session_state.message = (
+        f"Fourmi {ant['id']} avance vers {next_position}."
+    )
+
+
+# ============================================================
+# PHEROMONE UPDATE
+# ============================================================
+
+def update_pheromones(rho, q):
+    pheromones = st.session_state.pheromones
+
+    # Evaporation.
+    pheromones *= (1 - rho)
+
+    # Reinforcement by successful ants.
+    for result in st.session_state.completed_paths:
+        route = result["chemin"]
+        length = result["distance"]
+
+        if length <= 0:
+            continue
+
+        deposit = q / length
+
+        for cell in route:
+            pheromones[cell] += deposit
+
+    pheromones[:] = np.clip(pheromones, 0.001, 100)
+
+    st.session_state.pheromones = pheromones
+
+    st.session_state.history.append({
+        "iteration": st.session_state.iteration,
+        "meilleure_distance": (
+            st.session_state.best_length
+            if math.isfinite(st.session_state.best_length)
+            else None
+        ),
+        "fourmis_arrivees": len(
+            st.session_state.completed_paths
+        )
+    })
+
+
+def next_iteration(rho, q):
+    update_pheromones(rho, q)
+
+    st.session_state.iteration += 1
+
+    st.session_state.ants = []
+
+    for i in range(st.session_state.nb_ants):
+        st.session_state.ants.append({
+            "id": i + 1,
+            "position": NEST,
+            "path": [NEST],
+            "phase": "aller",
+            "status": "active",
+            "length": 0.0,
+            "steps": 0,
+            "color": plt.cm.tab20(i % 20),
+        })
+
+    st.session_state.completed_paths = []
+    st.session_state.step = 0
+    st.session_state.stage = "construction"
+    st.session_state.message = (
+        "Nouvelle itération : les fourmis repartent du nid."
+    )
+
+
+# ============================================================
+# DRAWING
+# ============================================================
+
+def draw_ant(ax, position, color, phase="aller"):
+    r, c = position
+
+    # Ant body: abdomen, thorax and head.
+    ax.add_patch(Ellipse(
+        (c - 0.18, -r),
+        0.34, 0.24,
+        color=color,
+        zorder=8
+    ))
+
+    ax.add_patch(Circle(
+        (c + 0.03, -r),
+        0.10,
+        color=color,
+        zorder=9
+    ))
+
+    ax.add_patch(Circle(
+        (c + 0.19, -r),
+        0.12,
+        color=color,
+        zorder=10
+    ))
+
+    # Antennae.
+    ax.plot(
+        [c + 0.23, c + 0.30],
+        [-r + 0.08, -r + 0.20],
+        color="black",
+        linewidth=1.4,
+        zorder=11
+    )
+
+    ax.plot(
+        [c + 0.23, c + 0.37],
+        [-r + 0.07, -r + 0.15],
+        color="black",
+        linewidth=1.4,
+        zorder=11
+    )
+
+    # Six legs.
+    for offset in [-0.09, 0.0, 0.09]:
+        ax.plot(
+            [c + offset, c + offset - 0.12],
+            [-r, -r - 0.15],
+            color="black",
+            linewidth=1.2,
+            zorder=7
+        )
+
+        ax.plot(
+            [c + offset, c + offset - 0.12],
+            [-r, -r + 0.15],
+            color="black",
+            linewidth=1.2,
+            zorder=7
+        )
+
+
+def draw_environment():
+    fig, ax = plt.subplots(figsize=(13, 8))
+
+    pheromones = st.session_state.pheromones.copy()
+
+    # Pheromone background.
+    display = pheromones.copy()
+
+    for cell in OBSTACLES:
+        display[cell] = np.nan
+
+    ax.imshow(
+        display,
+        cmap="YlOrBr",
+        alpha=0.55,
+        interpolation="nearest",
+        origin="upper"
+    )
+
+    # Grid.
+    ax.set_xticks(np.arange(-0.5, COLS, 1))
+    ax.set_yticks(np.arange(-0.5, ROWS, 1))
+    ax.grid(color="gray", alpha=0.25)
+    ax.set_xlim(-0.5, COLS - 0.5)
+    ax.set_ylim(ROWS - 0.5, -0.5)
+
+    # Obstacles.
+    for r, c in OBSTACLES:
+        ax.add_patch(plt.Rectangle(
+            (c - 0.5, r - 0.5),
+            1, 1,
+            color="#555555",
+            zorder=3
+        ))
+
+    # Nest.
+    ax.add_patch(Circle(
+        (NEST[1], NEST[0]),
+        0.42,
+        color="#8B4513",
+        zorder=5
+    ))
+    ax.text(
+        NEST[1], NEST[0] - 0.7,
+        "NID",
+        ha="center",
+        weight="bold",
+        color="#8B4513"
+    )
+
+    # Food.
+    ax.add_patch(Circle(
+        (FOOD[1], FOOD[0]),
+        0.42,
+        color="gold",
+        edgecolor="darkorange",
+        linewidth=2,
+        zorder=5
+    ))
+    ax.text(
+        FOOD[1], FOOD[0] - 0.7,
+        "NOURRITURE",
+        ha="center",
+        weight="bold",
+        color="#B8860B"
+    )
+
+    # Best path.
+    if st.session_state.best_path:
+        path = st.session_state.best_path
+        xs = [cell[1] for cell in path]
+        ys = [-cell[0] for cell in path]
+
+        ax.plot(
+            xs, ys,
+            color="limegreen",
+            linewidth=2.8,
+            alpha=0.9,
+            zorder=6,
+            label="Meilleur chemin"
+        )
+
+    # Current ants and their paths.
+    for ant in st.session_state.ants:
+        if ant["status"] == "active":
+            path = ant["path"]
+
+            if len(path) > 1:
+                xs = [cell[1] for cell in path]
+                ys = [-cell[0] for cell in path]
+
+                ax.plot(
+                    xs, ys,
+                    color=ant["color"],
+                    linewidth=1.4,
+                    alpha=0.65,
+                    zorder=6
+                )
+
+            draw_ant(
+                ax,
+                ant["position"],
+                ant["color"],
+                ant["phase"]
+            )
+
+    ax.set_title(
+        "Recherche de nourriture par les fourmis artificielles",
+        fontsize=15,
+        weight="bold"
+    )
+
+    ax.set_xlabel("Colonnes")
+    ax.set_ylabel("Lignes")
+
+    ax.invert_yaxis()
     return fig
 
-if "ants" not in st.session_state: reset(4,5,1,2,.5,10,7)
-s=st.session_state
-with st.sidebar:
-    st.header("Paramètres")
-    n=st.slider("Nombre de fourmis",2,8,s.nants); it=st.slider("Itérations",1,20,s.niters)
-    alpha=st.slider("α — phéromones",0.0,3.0,s.alpha,.1); beta=st.slider("β — heuristique",0.0,5.0,s.beta,.1)
-    rho=st.slider("ρ — évaporation",0.0,.9,s.rho,.05); q=st.number_input("Q — dépôt",.1,100.0,s.q,.5); seed=st.number_input("Graine",0,99999,s.seed)
-    if st.button("Réinitialiser avec ces paramètres",use_container_width=True): reset(n,it,alpha,beta,rho,q,int(seed)); st.rerun()
-    st.caption("Distances fixes. Départs des fourmis : A, B, C, D, puis cycle.")
-st.title("🐜 ACO — Visualiseur pas à pas")
-st.caption("Ant System classique · TSP à quatre villes")
-cols=st.columns(4); cols[0].metric("Itération",f"{min(s.iteration,s.niters)} / {s.niters}"); cols[1].metric("Fourmis",s.nants); cols[2].metric("Fourmi active",ant_now()["id"] if ant_now() else "—"); cols[3].metric("Meilleure distance","—" if not np.isfinite(s.best_len) else f"{s.best_len:.2f}")
-left,right=st.columns([1.15,.85],gap="large")
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+st.sidebar.title("⚙️ Paramètres")
+
+nb_ants = st.sidebar.slider(
+    "Nombre de fourmis",
+    1, 15, 5
+)
+
+alpha = st.sidebar.slider(
+    "Alpha (importance des phéromones)",
+    0.0, 5.0, 1.0, 0.1
+)
+
+beta = st.sidebar.slider(
+    "Beta (importance de l'information heuristique)",
+    0.0, 5.0, 2.0, 0.1
+)
+
+rho = st.sidebar.slider(
+    "Taux d'évaporation ρ",
+    0.0, 0.9, 0.2, 0.05
+)
+
+q = st.sidebar.slider(
+    "Quantité de phéromone Q",
+    1.0, 100.0, 20.0
+)
+
+if st.sidebar.button("🔄 Réinitialiser la simulation"):
+    st.session_state.nb_ants = nb_ants
+    initialize()
+    st.session_state.initialized = True
+    st.rerun()
+
+if not st.session_state.initialized:
+    st.session_state.nb_ants = nb_ants
+    initialize()
+    st.session_state.initialized = True
+
+
+# ============================================================
+# MAIN INTERFACE
+# ============================================================
+
+st.title("🐜 Algorithme des colonies de fourmis")
+st.subheader("Simulation : recherche de nourriture")
+
+st.markdown("""
+Cette simulation illustre comment plusieurs fourmis artificielles
+peuvent trouver un chemin entre leur nid et une source de nourriture.
+
+Chaque fourmi prend ses décisions en fonction de :
+- **La phéromone (τ)** : trace laissée par les fourmis précédentes.
+- **L'information heuristique (η)** : proximité de la destination.
+- **La probabilité (P)** : chance de choisir une direction.
+""")
+
+# ============================================================
+# BUTTONS
+# ============================================================
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    next_step = st.button(
+        "▶ Étape suivante",
+        use_container_width=True
+    )
+
+with col2:
+    run_iteration = st.button(
+        "⏩ Exécuter une itération",
+        use_container_width=True
+    )
+
+with col3:
+    run_all = st.button(
+        "🚀 Lancer 5 itérations",
+        use_container_width=True
+    )
+
+if next_step:
+    active_ants = [
+        ant for ant in st.session_state.ants
+        if ant["status"] == "active"
+    ]
+
+    if active_ants:
+        ant = active_ants[0]
+        move_ant(ant, alpha, beta)
+        st.session_state.step += 1
+        st.session_state.stage = "construction"
+    else:
+        next_iteration(rho, q)
+
+if run_iteration or run_all:
+    iterations_to_run = 1 if run_iteration else 5
+
+    for _ in range(iterations_to_run):
+        for _step in range(ROWS * COLS * 2):
+            active_ants = [
+                ant for ant in st.session_state.ants
+                if ant["status"] == "active"
+            ]
+
+            if not active_ants:
+                break
+
+            for ant in active_ants:
+                move_ant(ant, alpha, beta)
+
+        next_iteration(rho, q)
+
+st.info(st.session_state.message)
+
+# ============================================================
+# ENVIRONMENT AND STATISTICS
+# ============================================================
+
+left, right = st.columns([2, 1])
+
 with left:
-    st.subheader("1. Graphe et parcours"); st.plotly_chart(graph(),use_container_width=True,config={"displayModeBar":False}); st.caption("Épaisseur = phéromones. Labels = distance et τ.")
+    st.pyplot(draw_environment(), use_container_width=True)
+
 with right:
-    st.subheader("2. Algorithme en cours")
-    line=s.stage if s.phase=="construct" else s.phase
-    for key,label in PSEUDO:
-        if key==line: st.markdown(f"<div style='background:#DCEBFF;color:#12345A;padding:9px;border-radius:8px;font-weight:700;margin:4px 0'>▶ {label}</div>",unsafe_allow_html=True)
-        else: st.markdown(f"<div style='padding:7px;color:#64748b;border-bottom:1px solid #eee'>{label}</div>",unsafe_allow_html=True)
-    st.info(s.message)
-st.divider(); st.subheader("3. Matrices")
-eta=np.zeros_like(DIST); eta[DIST>0]=1/DIST[DIST>0]
-m1,m2,m3=st.columns(3)
-with m1: st.markdown("**Distances dᵢⱼ**"); st.dataframe(pd.DataFrame(DIST,index=CITIES,columns=CITIES),use_container_width=True)
-with m2: st.markdown("**Heuristique ηᵢⱼ=1/dᵢⱼ**"); st.dataframe(pd.DataFrame(eta,index=CITIES,columns=CITIES).round(2),use_container_width=True)
-with m3: st.markdown("**Phéromones τᵢⱼ**"); st.dataframe(pd.DataFrame(s.tau,index=CITIES,columns=CITIES).round(2),use_container_width=True)
-st.divider(); st.subheader("4. Fourmi active")
-a=ant_now()
-if a:
-    st.write(f"Fourmi **{a['id']}** · départ {CITIES[a['start']]} · parcours `{route_text(a['route'])}`")
-    if a["candidates"]:
-        cur=a["route"][-1]; rows=[]
-        for pos,j in enumerate(a["candidates"]): rows.append({"Candidate":CITIES[j],"τᵢⱼ":round(s.tau[cur,j],3),"ηᵢⱼ":round(1/DIST[cur,j],3),"Probabilité":f"{a['probs'][pos]*100:.1f}%" if a["probs"] else "À calculer"})
-        st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
-else: st.caption("Construction terminée pour cette itération.")
-if s.routes:
-    st.markdown("**Tournées terminées**"); st.dataframe(pd.DataFrame([{"Fourmi":x["ant"],"Parcours":route_text(x["route"]),"Distance":round(x["length"],2)} for x in s.routes]),use_container_width=True,hide_index=True)
-explain={"identify":"Repérer les villes non visitées (ou le retour au départ).","probability":"Calculer τᵢⱼ^α × ηᵢⱼ^β puis normaliser les poids.","select":"Tirer une ville selon la distribution calculée.","move":"Déplacer la fourmi et ajouter la ville à la tournée.","evaluate":"Comparer les longueurs des tournées et garder la meilleure.","evaporate":"Multiplier les phéromones par (1−ρ).","deposit":"Déposer Q/Lₖ sur les arêtes parcourues.","done":"L’itération est terminée.","finished":"Nombre maximal d’itérations atteint."}
-st.markdown("**Que se passe-t-il ?** "+explain.get(s.stage if s.phase=="construct" else s.phase,""))
-st.divider(); b1,b2,b3=st.columns([1,1,2])
-with b1:
-    if st.button("Réinitialiser",use_container_width=True): reset(s.nants,s.niters,s.alpha,s.beta,s.rho,s.q,s.seed); st.rerun()
-with b2:
-    if st.button("Étape suivante ➜",type="primary",use_container_width=True,disabled=s.phase=="finished"): step(); st.rerun()
-with b3:
-    if s.phase=="finished": st.success(f"Terminé. Meilleure tournée : {route_text(s.best_route)} — {s.best_len:.2f}")
-    else: st.caption("Chaque clic exécute une étape logique. L’étape courante est surlignée.")
-if s.history:
-    st.subheader("5. Évolution de la meilleure distance"); st.line_chart(pd.DataFrame({"Itération":range(1,len(s.history)+1),"Distance":s.history}).set_index("Itération")); st.success(f"Meilleur parcours : {route_text(s.best_route)} — distance {s.best_len:.2f}")
-with st.expander("Formules utilisées"):
-    st.latex(r"P_{ij}^{k}=\frac{(\tau_{ij})^\alpha(\eta_{ij})^\beta}{\sum_{l\in N_i^k}(\tau_{il})^\alpha(\eta_{il})^\beta}")
-    st.latex(r"\eta_{ij}=\frac{1}{d_{ij}}")
-    st.latex(r"\tau_{ij}\leftarrow(1-\rho)\tau_{ij}+\sum_k\Delta\tau_{ij}^k")
-    st.latex(r"\Delta\tau_{ij}^k=\frac{Q}{L_k}")
-    st.caption("Ant System classique, TSP symétrique, dépôt dans les deux sens.")
+    st.markdown("### 📊 État de la simulation")
+
+    st.metric(
+        "Itération",
+        st.session_state.iteration
+    )
+
+    st.metric(
+        "Meilleure distance",
+        (
+            f"{st.session_state.best_length:.2f}"
+            if math.isfinite(st.session_state.best_length)
+            else "Pas encore trouvée"
+        )
+    )
+
+    st.metric(
+        "Fourmis revenues au nid",
+        sum(
+            ant["status"] == "terminée"
+            for ant in st.session_state.ants
+        )
+    )
+
+    st.markdown("### 🐜 État des fourmis")
+
+    ant_table = []
+
+    for ant in st.session_state.ants:
+        ant_table.append({
+            "Fourmi": ant["id"],
+            "Position": str(ant["position"]),
+            "Phase": ant["phase"],
+            "État": ant["status"],
+            "Distance": round(ant["length"], 2)
+        })
+
+    st.dataframe(
+        pd.DataFrame(ant_table),
+        use_container_width=True,
+        hide_index=True
+    )
+
+# ============================================================
+# CALCULATION DETAILS
+# ============================================================
+
+st.divider()
+st.header("🧮 Calcul de la décision")
+
+if st.session_state.last_candidates:
+    st.markdown(
+        f"**Fourmi active :** {st.session_state.current_ant}"
+    )
+
+    calculation_rows = []
+
+    for item in st.session_state.last_candidates:
+        calculation_rows.append({
+            "Position candidate": str(item["cell"]),
+            "Distance d": round(item["distance"], 3),
+            "Phéromone τ": round(item["tau"], 4),
+            "Heuristique η": round(item["eta"], 4),
+            "Poids τᵅ × ηᵝ": round(item["weight"], 5),
+            "Probabilité": round(item["probability"], 4)
+        })
+
+    st.dataframe(
+        pd.DataFrame(calculation_rows),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    if st.session_state.last_decision:
+        selected = st.session_state.last_decision
+
+        st.success(
+            f"Direction choisie : {selected['cell']} "
+            f"| Probabilité : {selected['probability']:.2%}"
+        )
+else:
+    st.info(
+        "Cliquez sur « Étape suivante » pour observer "
+        "la première décision d'une fourmi."
+    )
+
+# ============================================================
+# PHEROMONE MATRIX
+# ============================================================
+
+st.divider()
+st.header("🌡️ Matrice des phéromones")
+
+st.caption(
+    "Chaque cellule représente la quantité de phéromone "
+    "associée à une position de l'environnement. "
+    "Il s'agit d'une simplification pédagogique du modèle."
+)
+
+pheromone_df = pd.DataFrame(
+    st.session_state.pheromones
+)
+
+st.dataframe(
+    pheromone_df.round(2),
+    use_container_width=True
+)
+
+# ============================================================
+# PSEUDOCODE
+# ============================================================
+
+st.divider()
+st.header("📜 Pseudocode de l'algorithme ACO")
+
+pseudocode = [
+    ("1", "Initialiser les phéromones", "Initialisation"),
+    ("2", "Placer les fourmis au nid", "Construction"),
+    ("3", "Identifier les déplacements possibles", "Construction"),
+    ("4", "Calculer τ et η pour chaque direction", "Calcul"),
+    ("5", "Calculer les probabilités de transition", "Calcul"),
+    ("6", "Choisir une direction aléatoirement", "Décision"),
+    ("7", "Déplacer la fourmi", "Construction"),
+    ("8", "Répéter jusqu'à atteindre la nourriture", "Construction"),
+    ("9", "Retourner au nid", "Construction"),
+    ("10", "Évaluer la longueur du chemin", "Évaluation"),
+    ("11", "Évaporer les phéromones", "Amélioration"),
+    ("12", "Renforcer les meilleurs chemins", "Amélioration"),
+    ("13", "Répéter les itérations", "Terminaison")
+]
+
+for number, description, stage in pseudocode:
+    if stage == st.session_state.stage:
+        st.markdown(
+            f"🟢 **{number}. {description}**"
+            "  ← Étape actuelle"
+        )
+    else:
+        st.markdown(
+            f"⚪ {number}. {description}"
+        )
+
+# ============================================================
+# FORMULAS
+# ============================================================
+
+st.divider()
+st.header("📐 Formules utilisées")
+
+st.latex(
+    r"P_{ij} = "
+    r"\frac{\tau_{ij}^{\alpha}\eta_{ij}^{\beta}}"
+    r"{\sum_{l \in N_i}\tau_{il}^{\alpha}\eta_{il}^{\beta}}"
+)
+
+st.latex(
+    r"\eta_{ij} = \frac{1}{d(j,\text{destination})}"
+)
+
+st.latex(
+    r"\tau_{ij} \leftarrow (1-\rho)\tau_{ij}"
+)
+
+st.latex(
+    r"\tau_{ij} \leftarrow \tau_{ij} + "
+    r"\frac{Q}{L_k}"
+)
+
+st.markdown("""
+**Interprétation :**
+
+- α contrôle l'influence des phéromones.
+- β contrôle l'influence de l'information heuristique.
+- ρ représente le taux d'évaporation.
+- Q représente la quantité de phéromone déposée.
+- Lₖ représente la longueur du chemin parcouru par la fourmi k.
+
+L'évaporation réduit progressivement les traces anciennes.
+Le renforcement favorise les chemins courts découverts par les fourmis.
+""")
